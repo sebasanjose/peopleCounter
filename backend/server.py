@@ -4,6 +4,7 @@ import numpy as np
 import base64
 import json
 import time
+import io
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -33,6 +34,9 @@ current_count = 0
 total_count = 0  # Initialize total count
 connected_clients = set()
 
+# In-memory video storage
+video_buffers = {}
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -56,13 +60,15 @@ async def root():
 
 @app.post("/upload-video")
 async def upload_video(file: UploadFile = File(...)):
-    # Save the uploaded video to a temporary file
-    temp_file = f"temp_{int(time.time())}.mp4"
-    with open(temp_file, "wb") as buffer:
-        buffer.write(await file.read())
+    # Read the video into memory
+    video_id = f"video_{int(time.time())}"
+    video_content = await file.read()
     
-    # Process the video and return the path
-    return {"filename": temp_file}
+    # Store in memory
+    video_buffers[video_id] = video_content
+    
+    # Return the video ID
+    return {"filename": video_id}
 
 @app.get("/count-events")
 async def get_count_events():
@@ -124,78 +130,96 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
             
             elif data["type"] == "video_file":
-                # Process a video file
-                filename = data["filename"]
-                if not os.path.exists(filename):
-                    await websocket.send_json({"error": "File not found"})
+                # Process a video file from memory
+                video_id = data["filename"]
+                
+                if video_id not in video_buffers:
+                    await websocket.send_json({"error": "Video not found in memory"})
                     continue
                 
-                cap = cv2.VideoCapture(filename)
-                frame_count = 0
+                # Write the video buffer to a temporary file-like object
+                video_bytes = io.BytesIO(video_buffers[video_id])
                 
-                # Reset count events for new video
-                count_events = []
-                current_count = 0
-                total_count = 0  # Reset total count for new video
+                # Create a temporary file for OpenCV to read (OpenCV can't read directly from memory)
+                temp_file = f"temp_{video_id}.mp4"
+                with open(temp_file, "wb") as f:
+                    f.write(video_bytes.getvalue())
                 
-                while cap.isOpened():
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
+                try:
+                    cap = cv2.VideoCapture(temp_file)
+                    frame_count = 0
                     
-                    # Process every 5th frame to improve performance
-                    if frame_count % 5 == 0:
-                        # Run YOLO detection
-                        results = model(frame, classes=0)
+                    # Reset count events for new video
+                    count_events = []
+                    current_count = 0
+                    total_count = 0  # Reset total count for new video
+                    
+                    while cap.isOpened():
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
                         
-                        # Count people
-                        person_count = len(results[0].boxes)
-                        
-                        # Check if count changed
-                        if person_count != current_count:
-                            # Get timestamp based on video frame
-                            fps = cap.get(cv2.CAP_PROP_FPS)
-                            timestamp = frame_count / fps
+                        # Process every 5th frame to improve performance
+                        if frame_count % 5 == 0:
+                            # Run YOLO detection
+                            results = model(frame, classes=0)
                             
-                            # Update total count - add new people detected
-                            if person_count > current_count:
-                                total_count += (person_count - current_count)
+                            # Count people
+                            person_count = len(results[0].boxes)
                             
-                            count_events.append({
-                                "timestamp": timestamp,
-                                "frame": frame_count,
+                            # Check if count changed
+                            if person_count != current_count:
+                                # Get timestamp based on video frame
+                                fps = cap.get(cv2.CAP_PROP_FPS)
+                                timestamp = frame_count / fps
+                                
+                                # Update total count - add new people detected
+                                if person_count > current_count:
+                                    total_count += (person_count - current_count)
+                                
+                                count_events.append({
+                                    "timestamp": timestamp,
+                                    "frame": frame_count,
+                                    "count": person_count,
+                                    "previous_count": current_count,
+                                    "total_count": total_count
+                                })
+                                current_count = person_count
+                            
+                            # Draw bounding boxes
+                            annotated_frame = results[0].plot()
+                            
+                            # Convert to base64 for sending to client
+                            _, buffer = cv2.imencode('.jpg', annotated_frame)
+                            img_str = base64.b64encode(buffer).decode('utf-8')
+                            
+                            # Send the processed frame and count back to the client
+                            await websocket.send_json({
+                                "type": "detection",
+                                "frame": f"data:image/jpeg;base64,{img_str}",
                                 "count": person_count,
-                                "previous_count": current_count,
-                                "total_count": total_count
+                                "frame_number": frame_count,
+                                "events": count_events[-10:] if count_events else []
                             })
-                            current_count = person_count
                         
-                        # Draw bounding boxes
-                        annotated_frame = results[0].plot()
-                        
-                        # Convert to base64 for sending to client
-                        _, buffer = cv2.imencode('.jpg', annotated_frame)
-                        img_str = base64.b64encode(buffer).decode('utf-8')
-                        
-                        # Send the processed frame and count back to the client
-                        await websocket.send_json({
-                            "type": "detection",
-                            "frame": f"data:image/jpeg;base64,{img_str}",
-                            "count": person_count,
-                            "frame_number": frame_count,
-                            "events": count_events[-10:] if count_events else []
-                        })
+                        frame_count += 1
                     
-                    frame_count += 1
-                
-                cap.release()
-                
-                # Send complete event list after processing
-                await websocket.send_json({
-                    "type": "complete",
-                    "events": count_events,
-                    "total_frames": frame_count
-                })
+                    cap.release()
+                    
+                    # Send complete event list after processing
+                    await websocket.send_json({
+                        "type": "complete",
+                        "events": count_events,
+                        "total_frames": frame_count
+                    })
+                finally:
+                    # Clean up the temporary file
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                    
+                    # Remove the video from memory after processing
+                    if video_id in video_buffers:
+                        del video_buffers[video_id]
             
             elif data["type"] == "seek":
                 # Handle seeking to a specific frame
