@@ -2,6 +2,7 @@ export interface CountEvent {
   timestamp: string | number;
   count: number;
   previous_count: number;
+  total_count: number;
   frame?: number;
 }
 
@@ -18,6 +19,7 @@ export interface VideoFeedProps {
 
 export interface CountDisplayProps {
   count: number;
+  totalCount: number;
 }
 
 export interface TimelineProps {

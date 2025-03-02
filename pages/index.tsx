@@ -8,6 +8,7 @@ import { CountEvent } from '../types';
 
 export default function Home() {
   const [currentCount, setCurrentCount] = useState<number>(0);
+  const [totalCount, setTotalCount] = useState<number>(0);
   const [countEvents, setCountEvents] = useState<CountEvent[]>([]);
   const [videoMode, setVideoMode] = useState<'webcam' | 'upload'>('webcam');
   const [uploadedVideoFile, setUploadedVideoFile] = useState<string | null>(null);
@@ -20,16 +21,38 @@ export default function Home() {
   };
 
   const handleEventsUpdate = (events: CountEvent[]) => {
+    // Update events
     setCountEvents(events);
+    
+    // Update total count based on the latest event
+    if (events.length > 0) {
+      const latestEvent = events[events.length - 1];
+      if (latestEvent.total_count !== undefined) {
+        setTotalCount(latestEvent.total_count);
+      }
+    }
   };
 
   const handleVideoUpload = (filename: string) => {
     setUploadedVideoFile(filename);
     setVideoMode('upload');
+    // Reset counts when uploading a new video
+    setCurrentCount(0);
+    setTotalCount(0);
+    setCountEvents([]);
   };
 
   const handleFrameUpdate = (frame: number) => {
     setCurrentFrame(frame);
+    
+    // Update current count and total count based on the frame
+    const eventAtFrame = countEvents.find(e => e.frame === frame);
+    if (eventAtFrame) {
+      setCurrentCount(eventAtFrame.count);
+      if (eventAtFrame.total_count !== undefined) {
+        setTotalCount(eventAtFrame.total_count);
+      }
+    }
   };
 
   const handleTotalFramesUpdate = (frames: number) => {
@@ -40,9 +63,11 @@ export default function Home() {
     setIsPlaying(!isPlaying);
   };
 
-  const handleSeekToCount = (count: number) => {
+  const handleSeekToCount = (count: number, isTotal: boolean = false) => {
     // Find the first event with the specified count
-    const event = countEvents.find(e => e.count === count);
+    const property = isTotal ? 'total_count' : 'count';
+    const event = countEvents.find(e => e[property] === count);
+    
     if (event && event.frame !== undefined) {
       setCurrentFrame(event.frame);
     }
@@ -119,14 +144,21 @@ export default function Home() {
           
           {/* Right Column - Count Display and Controls */}
           <div className="space-y-8">
-            <CountDisplay count={currentCount} />
+            <CountDisplay count={currentCount} totalCount={totalCount} />
             
             <div className="bg-card rounded-lg shadow-lg p-4">
               <h2 className="text-2xl font-semibold mb-4 text-text">Count History</h2>
               <div className="space-y-2 max-h-60 overflow-y-auto">
                 {countEvents.map((event, index) => (
-                  <div key={index} className="flex justify-between items-center p-2 bg-gray-100 rounded">
-                    <span>Count: {event.count}</span>
+                  <div 
+                    key={index} 
+                    className="flex justify-between items-center p-2 bg-gray-100 rounded cursor-pointer hover:bg-gray-200"
+                    onClick={() => event.frame !== undefined && setCurrentFrame(event.frame)}
+                  >
+                    <div>
+                      <span className="font-medium">Count: {event.count}</span>
+                      <span className="ml-2 text-sm text-gray-600">Total: {event.total_count}</span>
+                    </div>
                     <span className="text-sm text-gray-500">
                       {typeof event.timestamp === 'string' 
                         ? new Date(event.timestamp).toLocaleTimeString() 

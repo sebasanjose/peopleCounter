@@ -30,6 +30,7 @@ model = YOLO("yolov8n.pt")
 # Store for count events
 count_events = []
 current_count = 0
+total_count = 0  # Initialize total count
 connected_clients = set()
 
 class ConnectionManager:
@@ -70,7 +71,7 @@ async def get_count_events():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global count_events, current_count
+    global count_events, current_count, total_count
     
     await manager.connect(websocket)
     try:
@@ -94,10 +95,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Check if count changed
                 if person_count != current_count:
                     timestamp = datetime.now().isoformat()
+                    
+                    # Update total count - add new people detected
+                    if person_count > current_count:
+                        total_count += (person_count - current_count)
+                    
                     count_events.append({
                         "timestamp": timestamp,
                         "count": person_count,
-                        "previous_count": current_count
+                        "previous_count": current_count,
+                        "total_count": total_count
                     })
                     current_count = person_count
                 
@@ -129,6 +136,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Reset count events for new video
                 count_events = []
                 current_count = 0
+                total_count = 0  # Reset total count for new video
                 
                 while cap.isOpened():
                     ret, frame = cap.read()
@@ -148,11 +156,17 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Get timestamp based on video frame
                             fps = cap.get(cv2.CAP_PROP_FPS)
                             timestamp = frame_count / fps
+                            
+                            # Update total count - add new people detected
+                            if person_count > current_count:
+                                total_count += (person_count - current_count)
+                            
                             count_events.append({
                                 "timestamp": timestamp,
                                 "frame": frame_count,
                                 "count": person_count,
-                                "previous_count": current_count
+                                "previous_count": current_count,
+                                "total_count": total_count
                             })
                             current_count = person_count
                         
@@ -182,6 +196,25 @@ async def websocket_endpoint(websocket: WebSocket):
                     "events": count_events,
                     "total_frames": frame_count
                 })
+            
+            elif data["type"] == "seek":
+                # Handle seeking to a specific frame
+                frame_number = data.get("frame", 0)
+                
+                # Find the event closest to the requested frame
+                closest_event = None
+                min_distance = float('inf')
+                
+                for event in count_events:
+                    if "frame" in event:
+                        distance = abs(event["frame"] - frame_number)
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_event = event
+                
+                # Update current count based on the closest event
+                if closest_event:
+                    current_count = closest_event["count"]
     
     except WebSocketDisconnect:
         manager.disconnect(websocket)
